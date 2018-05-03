@@ -13,27 +13,33 @@ import           Data.Text.Lazy                 ( Text )
 import qualified Data.Text.Lazy                as T
 import qualified Data.Text.Lazy.IO             as T
 import           Text.Parsec
+import           Text.Parsec.Text
 
 import           Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 
 
 data DynamicVar = DynamicVar {
-    dynVar :: T.Text,
-    dynPersistent :: Char,
-    dynMirror :: Char,
-    dynParam :: Maybe T.Text,
-    dynValue :: T.Text
+    dynVar :: !Text,
+    dynPersistent :: !Char,
+    dynMirror :: !Char,
+    dynParam :: Maybe Text,
+    dynValue :: !Text
     } deriving Show
 
 
+data StaticVar = StaticVar {
+    statVar :: !Text,
+    statValue :: !Text
+} deriving Show
+
 data MISCconfig = MISCconfig {
-    miscStatic :: HashMap Text Text,
+    miscStatic :: HashMap Text StaticVar,
     miscDynamic :: HashMap Text DynamicVar
 }
 
 
-parseConfigFile :: FilePath -> IO MISCconfig
+parseConfigFile :: FilePath -> IO (Either Text MISCconfig)
 parseConfigFile path = do
     content <- T.readFile path
     let cont = T.lines content
@@ -42,10 +48,10 @@ parseConfigFile path = do
     go
         :: Bool
         -> [Text]
-        -> HashMap Text Text
-        -> HashMap Text DynVar
-        -> MISCconfig
-    go _ [] stat dyn = MISCconfig stat dyn
+        -> HashMap Text StaticVar
+        -> HashMap Text DynamicVar
+        -> Either Text MISCconfig
+    go _ [] stat dyn = Right (MISCconfig stat dyn)
     go False (line : ls) stat dyn
         | T.strip line == ""
         = go False ls stat dyn
@@ -54,25 +60,28 @@ parseConfigFile path = do
         | T.strip line == "DYNAMIC"
         = go True ls stat dyn
         | otherwise
-        = let [name, value] = T.words line
-              newStat       = HM.insert name value stat
-          in  go True ls newStat dyn
+        = case parse staticVariable "" (T.toStrict line) of
+            Left err -> Left (T.pack (show err))
+            Right new -> 
+                let hm = HM.insert (statVar new) new stat
+                in  go False ls hm dyn
     go True (line : ls) stat dyn
         | T.strip line == ""
         = go True ls stat dyn
         | line `T.index` 0 == '#'
         = go True ls stat dyn
         | otherwise
-        = let [name, _permanent, _packet, value] = T.words line
-              newDyn = HM.insert name (DynVar name value) dyn
-          in  go True ls stat newDyn
+        = case parse dynamicVariable "" (T.toStrict line) of
+            Left err -> Left (T.pack (show err))
+            Right new -> 
+                let hm = HM.insert (dynVar new) new dyn
+                in  go True ls stat hm
 
 
-
-getResourceStatic :: MISCconfig -> Text -> Maybe Text
+getResourceStatic :: MISCconfig -> Text -> Maybe StaticVar
 getResourceStatic conf name = HM.lookup name (miscStatic conf)
 
-getResourceDynamic :: MISCconfig -> Text -> Maybe DynVar
+getResourceDynamic :: MISCconfig -> Text -> Maybe DynamicVar
 getResourceDynamic conf name = HM.lookup name (miscDynamic conf)
 
 
@@ -85,17 +94,16 @@ staticVariable = do
         v <- value
         endOfLine
         return v
-    return (Just (StaticVar i v))
+    pure (StaticVar i v)
 
 dynamicVariable = do
     i <- identifier
     spaces
     p <- oneOf "NY"
     spaces
-    m          <- oneOf "NY"
-
+    m <- oneOf "NY"
     (v, param) <- try (endOfLine >> return (T.empty, Nothing)) <|> parseValue m
-    return (Just (DynamicVar i p m param v))
+    pure (DynamicVar i p m param v)
   where
     parseValue 'Y' = withParam
     parseValue _   = valueOnly
@@ -112,11 +120,11 @@ dynamicVariable = do
         endOfLine
         return (v, Nothing)
 
-identifier :: Parser T.Text
+identifier :: Parser Text
 identifier = T.pack <$> many1 (oneOf baseChars)
 
 
-value :: Parser T.Text
+value :: Parser Text
 value = T.strip . T.pack <$> many (oneOf valBaseChars)
 
 
